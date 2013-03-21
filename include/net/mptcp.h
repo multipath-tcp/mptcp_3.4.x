@@ -210,7 +210,6 @@ struct mptcp_cb {
 	/* socket count in this connection */
 	u8 cnt_subflows;
 	u8 cnt_established;
-	u8 last_pi_selected;
 
 	u32 noneligible;	/* Path mask of temporarily non
 				 * eligible subflows by the scheduler
@@ -628,7 +627,6 @@ void mptcp_reinject_data(struct sock *orig_sk, int clone_it);
 void mptcp_update_sndbuf(struct mptcp_cb *mpcb);
 struct sk_buff *mptcp_next_segment(struct sock *sk, int *reinject);
 void mptcp_send_fin(struct sock *meta_sk);
-void mptcp_send_reset(struct sock *sk, struct sk_buff *skb);
 void mptcp_send_active_reset(struct sock *meta_sk, gfp_t priority);
 int mptcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 		     int push_one, gfp_t gfp);
@@ -686,6 +684,7 @@ int mptcp_fragment(struct sock *sk, struct sk_buff *skb, u32 len,
 		   unsigned int mss_now, int reinject);
 int mptso_fragment(struct sock *sk, struct sk_buff *skb, unsigned int len,
 		   unsigned int mss_now, gfp_t gfp, int reinject);
+void mptcp_destroy_sock(struct sock *sk);
 
 static inline void mptcp_push_pending_frames(struct sock *meta_sk)
 {
@@ -713,9 +712,25 @@ static inline void mptcp_sub_force_close(struct sock *sk)
 		mptcp_sub_close(sk, 0);
 }
 
+static inline void mptcp_send_reset(struct sock *sk)
+{
+	tcp_send_active_reset(sk, GFP_ATOMIC);
+	mptcp_sub_force_close(sk);
+}
+
 static inline int mptcp_is_data_fin(const struct sk_buff *skb)
 {
 	return TCP_SKB_CB(skb)->mptcp_flags & MPTCPHDR_FIN;
+}
+
+/* Is it a data-fin while in infinite mapping mode?
+ * In infinite mode, a subflow-fin is in fact a data-fin.
+ */
+static inline int mptcp_is_data_fin2(const struct sk_buff *skb,
+				     const struct tcp_sock *tp)
+{
+	return (TCP_SKB_CB(skb)->mptcp_flags & MPTCPHDR_FIN) ||
+	       (tp->mpcb->infinite_mapping && tcp_hdr(skb)->fin);
 }
 
 static inline int mptcp_is_data_seq(const struct sk_buff *skb)
@@ -962,26 +977,26 @@ static inline void mptcp_sub_close_passive(struct sock *sk)
 		mptcp_sub_close(sk, 0);
 }
 
-static inline int mptcp_fallback_infinite(struct tcp_sock *tp,
-					  const struct sk_buff *skb)
+static inline int mptcp_fallback_infinite(struct tcp_sock *tp, int flag)
 {
 	/* If data has been acknowleged on the meta-level, fully_established
 	 * will have been set before and thus we will not fall back to infinite
 	 * mapping.
 	 */
-	if (likely(tp->mptcp->fully_established))
+	if (likely(tp->mptcp->fully_established && !tp->mpcb->infinite_mapping))
 		return 0;
 
-	if (TCP_SKB_CB(skb)->tcp_flags & (TCPHDR_SYN | TCPHDR_FIN))
+	if (!(flag & FLAG_DATA_ACKED))
 		return 0;
 
-	pr_err("%s %#x will fallback - pi %d from %pS, seq %u\n", __func__,
+	pr_err("%s %#x will fallback - pi %d from %pS\n", __func__,
 	       tp->mpcb->mptcp_loc_token, tp->mptcp->path_index,
-	       __builtin_return_address(0), TCP_SKB_CB(skb)->seq);
-	if (is_master_tp(tp))
-		tp->mpcb->send_infinite_mapping = 1;
-	else
+	       __builtin_return_address(0));
+	if (!is_master_tp(tp))
 		return MPTCP_FLAG_SEND_RESET;
+
+	tp->mpcb->infinite_mapping = 1;
+	tp->mptcp->fully_established = 1;
 
 	return 0;
 }
@@ -1164,8 +1179,7 @@ static inline int mptcp_select_size(const struct sock *meta_sk)
 }
 static inline void mptcp_key_sha1(u64 key, u32 *token, u64 *idsn) {}
 static inline void mptcp_sub_close_passive(struct sock *sk) {}
-static inline int mptcp_fallback_infinite(const struct tcp_sock *tp,
-					  const struct sk_buff *skb)
+static inline int mptcp_fallback_infinite(const struct tcp_sock *tp, int flag)
 {
 	return 0;
 }
@@ -1182,8 +1196,7 @@ static inline int mptcp_sysctl_syn_retries(void)
 {
 	return 0;
 }
-static inline void mptcp_send_reset(const struct sock *sk,
-				    const struct sk_buff *skb) {}
+static inline void mptcp_send_reset(const struct sock *sk) {}
 static inline void mptcp_send_active_reset(struct sock *meta_sk,
 					   gfp_t priority) {}
 static inline int mptcp_write_xmit(struct sock *sk, unsigned int mss_now,
@@ -1220,6 +1233,7 @@ static inline int mptso_fragment(struct sock *sk, struct sk_buff *skb,
 {
 	return 0;
 }
+static inline void mptcp_destroy_sock(struct sock *sk) {}
 #endif /* CONFIG_MPTCP */
 
 #endif /* _MPTCP_H */
