@@ -3379,6 +3379,8 @@ static int tcp_clean_rtx_queue(struct sock *sk, int prior_fackets,
 		 */
 		if (!(scb->tcp_flags & TCPHDR_SYN)) {
 			flag |= FLAG_DATA_ACKED;
+			if (tp->mpc && mptcp_is_data_seq(skb))
+				flag |= MPTCP_FLAG_DATA_ACKED;
 		} else {
 			flag |= FLAG_SYN_ACKED;
 			tp->retrans_stamp = 0;
@@ -3842,7 +3844,7 @@ static int tcp_ack(struct sock *sk, struct sk_buff *skb, int flag)
 	flag |= tcp_clean_rtx_queue(sk, prior_fackets, prior_snd_una);
 
 	if (tp->mpc) {
-		flag |= mptcp_fallback_infinite(tp, flag);
+		flag |= mptcp_fallback_infinite(sk, flag);
 
 		if (flag & MPTCP_FLAG_SEND_RESET) {
 			pr_err("%s resetting flow\n", __func__);

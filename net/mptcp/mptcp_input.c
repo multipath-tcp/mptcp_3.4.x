@@ -62,17 +62,20 @@ static void mptcp_clean_rtx_queue(struct sock *meta_sk, u32 prior_snd_una)
 		tcp_unlink_write_queue(skb, meta_sk);
 
 		if (mptcp_is_data_fin(skb)) {
-			struct sock *sk_it, *tmpsk;
+			struct sock *sk_it;
 
 			/* DATA_FIN has been acknowledged - now we can close
-			 * the subflows */
-			mptcp_for_each_sk_safe(mpcb, sk_it, tmpsk) {
+			 * the subflows
+			 */
+			mptcp_for_each_sk(mpcb, sk_it) {
 				unsigned long delay = 0;
 
 				/* If we are the passive closer, don't trigger
 				 * subflow-fin until the subflow has been finned
-				 * by the peer - thus we add a delay. */
-				if (mpcb->passive_close && sk_it->sk_state == TCP_ESTABLISHED)
+				 * by the peer - thus we add a delay.
+				 */
+				if (mpcb->passive_close &&
+				    sk_it->sk_state == TCP_ESTABLISHED)
 					delay = inet_csk(sk_it)->icsk_rto << 3;
 
 				mptcp_sub_close(sk_it, delay);
@@ -219,7 +222,8 @@ static int mptcp_verif_dss_csum(struct sock *sk)
 
 		if (before(tp->mptcp->map_subseq + tp->mptcp->map_data_len, TCP_SKB_CB(tmp)->end_seq))
 			/* Mapping ends in the middle of the packet -
-			 * csum only these bytes */
+			 * csum only these bytes
+			 */
 			csum_len = tp->mptcp->map_subseq + tp->mptcp->map_data_len - TCP_SKB_CB(tmp)->seq;
 		else
 			csum_len = tmp->len;
@@ -239,8 +243,9 @@ static int mptcp_verif_dss_csum(struct sock *sk)
 
 		csum_tcp = skb_checksum(tmp, offset, csum_len, csum_tcp);
 
-		/* Was it on an odd-length?  Then we have to merge the next byte
-		 * correctly (see above)*/
+		/* Was it on an odd-length? Then we have to merge the next byte
+		 * correctly (see above)
+		 */
 		if (csum_len != (csum_len & (~1)))
 			overflowed = 1;
 
@@ -249,7 +254,7 @@ static int mptcp_verif_dss_csum(struct sock *sk)
 
 			/* If a 64-bit dss is present, we increase the offset
 			 * by 4 bytes, as the high-order 64-bits will be added
-			 * in the infal csum_partial-call.
+			 * in the final csum_partial-call.
 			 */
 			u32 offset = skb_transport_offset(tmp) +
 				     TCP_SKB_CB(tmp)->dss_off;
@@ -407,7 +412,6 @@ static int mptcp_skb_split_tail(struct sk_buff *skb, struct sock *sk, u32 seq)
 	struct sk_buff *buff;
 	int nsize;
 	int nlen, len;
-	u8 flags;
 
 	len = seq - TCP_SKB_CB(skb)->seq;
 	nsize = skb_headlen(skb) - len + tcp_sk(sk)->tcp_header_len;
@@ -435,11 +439,6 @@ static int mptcp_skb_split_tail(struct sk_buff *skb, struct sock *sk, u32 seq)
 
 	/* Correct the sequence numbers. */
 	TCP_SKB_CB(buff)->seq = TCP_SKB_CB(skb)->seq + len;
-
-	/* PSH and FIN should only be set in the second packet. */
-	flags = TCP_SKB_CB(skb)->tcp_flags;
-	TCP_SKB_CB(skb)->tcp_flags = flags & ~(TCPHDR_FIN | TCPHDR_PSH);
-	TCP_SKB_CB(buff)->tcp_flags = flags;
 
 	skb_split(skb, buff, len);
 
@@ -1046,7 +1045,7 @@ static void mptcp_data_ack(struct sock *sk, const struct sk_buff *skb)
 	/* Even if there is no data-ack, we stop retransmitting.
 	 * Except if this is a SYN/ACK. Then it is just a retransmission
 	 */
-	if (tp->mptcp->pre_established && !(tcb->tcp_flags & TCPHDR_SYN)) {
+	if (tp->mptcp->pre_established && !tcp_hdr(skb)->syn) {
 		tp->mptcp->pre_established = 0;
 		sk_stop_timer(sk, &tp->mptcp->mptcp_ack_timer);
 	}
@@ -1349,6 +1348,10 @@ void mptcp_parse_options(const uint8_t *ptr, int opsize,
 			mopt->data_len = get_unaligned_be16(ptr);
 
 			tcb->mptcp_flags |= MPTCPHDR_SEQ;
+
+			/* Is a check-sum present? */
+			if (opsize == mptcp_sub_len_dss(mdss, 1))
+				tcb->mptcp_flags |= MPTCPHDR_DSS_CSUM;
 		}
 
 		if (mdss->F)
@@ -1632,6 +1635,19 @@ int mptcp_handle_options(struct sock *sk, const struct tcphdr *th, struct sk_buf
 
 	if (mptcp_mp_fail_rcvd(sk, th))
 		return 1;
+
+	/* RFC 6824, Section 3.3:
+	 * If a checksum is not present when its use has been negotiated, the
+	 * receiver MUST close the subflow with a RST as it is considered broken.
+	 */
+	if (mptcp_is_data_seq(skb) && tp->mpcb->dss_csum &&
+	    !(TCP_SKB_CB(skb)->mptcp_flags & MPTCPHDR_DSS_CSUM)) {
+		if (tcp_need_reset(sk->sk_state))
+			tcp_send_active_reset(sk, GFP_ATOMIC);
+
+		mptcp_sub_force_close(sk);
+		return 1;
+	}
 
 	/* We have to acknowledge retransmissions of the third
 	 * ack.
