@@ -198,8 +198,22 @@ struct sock *mptcp_select_ack_sock(const struct sock *meta_sk, int copied)
 
 static void mptcp_sock_def_error_report(struct sock *sk)
 {
+	struct mptcp_cb *mpcb = tcp_sk(sk)->mpcb;
+
 	if (!sock_flag(sk, SOCK_DEAD))
 		mptcp_sub_close(sk, 0);
+
+	if (mpcb->infinite_mapping_rcv || mpcb->infinite_mapping_snd) {
+		struct sock *meta_sk = mptcp_meta_sk(sk);
+
+		meta_sk->sk_err = sk->sk_err;
+		meta_sk->sk_err_soft = sk->sk_err_soft;
+
+		if (!sock_flag(meta_sk, SOCK_DEAD))
+			meta_sk->sk_error_report(meta_sk);
+
+		tcp_done(meta_sk);
+	}
 
 	sk->sk_err = 0;
 	return;
@@ -225,8 +239,30 @@ static void mptcp_sock_destruct(struct sock *sk)
 void mptcp_destroy_sock(struct sock *sk)
 {
 	if (is_meta_sk(sk)) {
+		struct sock *sk_it, *tmpsk;
+
 		__skb_queue_purge(&tcp_sk(sk)->mpcb->reinject_queue);
 		mptcp_purge_ofo_queue(tcp_sk(sk));
+
+		/* We have to close all remaining subflows. Normally, they
+		 * should all be about to get closed. But, if the kernel is
+		 * forcing a closure (e.g., tcp_write_err), the subflows might
+		 * not have been closed properly (as we are waiting for the
+		 * DATA_ACK of the DATA_FIN).
+		 */
+		mptcp_for_each_sk_safe(tcp_sk(sk)->mpcb, sk_it, tmpsk) {
+			/* Already did call tcp_close - waiting for graceful
+			 * closure.
+			 */
+			if (tcp_sk(sk_it)->closing)
+				continue;
+
+			/* Allow the delayed work first to prevent time-wait state */
+			if (delayed_work_pending(&tcp_sk(sk_it)->mptcp->work))
+				continue;
+
+			mptcp_sub_close(sk_it, 0);
+		}
 	} else {
 		mptcp_del_sock(sk);
 	}
@@ -768,6 +804,10 @@ int mptcp_alloc_mpcb(struct sock *meta_sk, __u64 remote_key, u32 window)
 
 	mptcp_mpcb_inherit_sockopts(meta_sk, master_sk);
 
+	mpcb->orig_sk_rcvbuf = meta_sk->sk_rcvbuf;
+	mpcb->orig_sk_sndbuf = meta_sk->sk_sndbuf;
+	mpcb->orig_window_clamp = meta_tp->window_clamp;
+
 	mptcp_debug("%s: created mpcb with token %#x\n",
 		    __func__, mpcb->mptcp_loc_token);
 
@@ -1121,6 +1161,7 @@ void mptcp_sub_close_wq(struct work_struct *work)
 		sock_rps_reset_flow(sk);
 		tcp_close(sk, 0);
 	} else if (tcp_close_state(sk)) {
+		sk->sk_shutdown |= SEND_SHUTDOWN;
 		tcp_send_fin(sk);
 	}
 
@@ -1176,6 +1217,7 @@ void mptcp_sub_close(struct sock *sk, unsigned long delay)
 				sock_rps_reset_flow(sk);
 				tcp_close(sk, 0);
 			} else if (tcp_close_state(sk)) {
+				sk->sk_shutdown |= SEND_SHUTDOWN;
 				tcp_send_fin(sk);
 			}
 
@@ -1550,6 +1592,13 @@ struct sock *mptcp_check_req_child(struct sock *meta_sk, struct sock *child,
 	child_tp->mptcp->rcv_low_prio = mtreq->low_prio;
 	child->sk_sndmsg_page = NULL;
 
+	/* We should allow proper increase of the snd/rcv-buffers. Thus, we
+	 * use the original values instead of the bloated up ones from the
+	 * clone.
+	 */
+	child->sk_sndbuf = mpcb->orig_sk_sndbuf;
+	child->sk_rcvbuf = mpcb->orig_sk_rcvbuf;
+
 	child_tp->mptcp->slave_sk = 1;
 	child_tp->mptcp->snt_isn = tcp_rsk(req)->snt_isn;
 	child_tp->mptcp->rcv_isn = tcp_rsk(req)->rcv_isn;
@@ -1609,7 +1658,7 @@ void __init mptcp_init(void)
 		goto register_sysctl_failed;
 #endif
 
-	pr_info("MPTCP: Stable release v0.86.4");
+	pr_info("MPTCP: Stable release v0.86.7");
 
 out:
 	return;
