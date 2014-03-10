@@ -107,27 +107,6 @@ int sysctl_tcp_moderate_rcvbuf __read_mostly = 1;
 int sysctl_tcp_abc __read_mostly;
 EXPORT_SYMBOL(sysctl_tcp_abc);
 
-#define FLAG_DATA		0x01 /* Incoming frame contained data.		*/
-#define FLAG_WIN_UPDATE		0x02 /* Incoming ACK was a window update.	*/
-#define FLAG_DATA_ACKED		0x04 /* This ACK acknowledged new data.		*/
-#define FLAG_RETRANS_DATA_ACKED	0x08 /* "" "" some of which was retransmitted.	*/
-#define FLAG_SYN_ACKED		0x10 /* This ACK acknowledged SYN.		*/
-#define FLAG_DATA_SACKED	0x20 /* New SACK.				*/
-#define FLAG_ECE		0x40 /* ECE in this ACK				*/
-#define FLAG_SLOWPATH		0x100 /* Do not skip RFC checks for window update.*/
-#define FLAG_ONLY_ORIG_SACKED	0x200 /* SACKs only non-rexmit sent before RTO */
-#define FLAG_SND_UNA_ADVANCED	0x400 /* Snd_una was changed (!= FLAG_DATA_ACKED) */
-#define FLAG_DSACKING_ACK	0x800 /* SACK blocks contained D-SACK info */
-#define FLAG_NONHEAD_RETRANS_ACKED	0x1000 /* Non-head rexmitted data was ACKed */
-#define FLAG_SACK_RENEGING	0x2000 /* snd_una advanced to a sacked seq */
-#define FLAG_UPDATE_TS_RECENT	0x4000 /* tcp_replace_ts_recent() */
-
-#define FLAG_ACKED		(FLAG_DATA_ACKED|FLAG_SYN_ACKED)
-#define FLAG_NOT_DUP		(FLAG_DATA|FLAG_WIN_UPDATE|FLAG_ACKED)
-#define FLAG_CA_ALERT		(FLAG_DATA_SACKED|FLAG_ECE)
-#define FLAG_FORWARD_PROGRESS	(FLAG_ACKED|FLAG_DATA_SACKED)
-#define FLAG_ANY_PROGRESS	(FLAG_FORWARD_PROGRESS|FLAG_SND_UNA_ADVANCED)
-
 #define TCP_REMNANT (TCP_FLAG_FIN|TCP_FLAG_URG|TCP_FLAG_SYN|TCP_FLAG_PSH)
 #define TCP_HP_BITS (~(TCP_RESERVED_BITS|TCP_FLAG_PSH))
 
